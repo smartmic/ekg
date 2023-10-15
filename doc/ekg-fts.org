@@ -1,0 +1,69 @@
+#+title: ekg-fts, full-text search extension for ekg, the Emacs Knowledge Graph
+#+author: Martin Michel
+#+email: dev@famic.de
+
+* Introduction
+
+In addition to semantic search via Large Language Models (see
+`ekg-llm'), this ekg extension provides full-text search (FTS)
+functionality for the body of ekg notes.
+
+Although it bears no resemblance to regular expressions or other
+well-known search patterns, the [[https://www.sqlite.org/fts5.html#full_text_query_syntax][FTS5 query syntax]] is quite powerful
+and and can also map phrases.
+
+** Explanation and considerations
+
+ekg-fts
+
+- Extends ekg for full-text search capabilities, an important function
+  for personal knowledge management
+- Uses [[https://www.sqlite.org/fts5.html][SQLite FTS5 Extension]] and can thus efficiently search very
+  large volumes of notes.
+- Is implemented only for Emacs 29 with builtin SQLite3. I started
+  with emacsql, but even the definition of TRIGGER presented me with
+  challenges that I don't have to face without this abstraction layer.
+- Requires schema additions on database level. Therefore, it may not
+  be suitable for every purpose of the triples package, but is best in
+  its own databases created just for ekg, see variable =ekg-db-file=
+  for ekg customization. Currently, a [[https://github.com/smartmic/triples/commit/e888c3eec2cca7c9e4d349356af403696d562cf1][patch in the triples package]] is
+  required for ekg-fts to work!
+- Is setup using an external content table (actually, it is a view,
+  not a table) to minimize the database size on disk. Only the FTS
+  index has to be created and managed.
+- If disk space consumption is of matter, further size reduction is
+  possible by reducing search capability an efficiency (not yet
+  implemented).
+
+* Usage
+
+*** Initialization and maintenance
+
+Before using FTS, it has to be set up by executing =(ekg-setup-fts)=.
+Due to the reasons above and because it is likely to be a one-time
+shot, this command should be run intentionally and is not given
+interactively. The FTS index will be build and necessary triggers
+activated. The index is not yet populated, only new notes will be
+added to it.
+
+If the ekg database contains already notes and those shall be subject
+for full-text search, all existing notes can be added (also
+non-interactively) by calling =(ekg-rebuild-fts)=. The same function
+can be executed any time to rebuild the FTS index in case it got
+inconsistent with the main ekg database entries. Normally, that should
+not be the case as triggers ensure all added/updated/deleted notes
+will be correctly handled in the index.
+
+If a note gets trashed, it will also be removed from the FTS index.
+
+*** Searching
+
+To start a full-text search through the text bodies of all ekg notes,
+call =ekg-show-notes-from-fts=. Entering the search query will return
+matching notes in an `ekg-notes' buffer.
+
+The [[https://www.sqlite.org/fts5.html#full_text_query_syntax][query syntax]] allows to search for simple strings, (combinations
+of) phrases, boolean operators (AND, OR, NOT) and phrase proximity
+using the NEAR keyword.
+
+
