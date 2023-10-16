@@ -40,11 +40,29 @@ ekg-fts case, a view on the triples table where the predicate is
 
 (ekg-deftest ekg-fts-test-query-after-insert ()
   "Test if a simple query after saving a new note matches"
-  (let ((note (ekg-note-create :text "They are asking for a 2.5% wage increase, which is in line with other city workers’ wage increases." :mode 'text-mode :tags '("tag1" "tag2"))))
+  (let ((note1 (ekg-note-create :text "They are asking for a 2.5% wage increase, which is in line with other city workers’ wage increases." :mode 'text-mode :tags '("tag1")))
+	(note2 (ekg-note-create :text "Early crop estimates confirm a good crop in the field along with increased acreage for the 2020 grinding season." :mode 'text-mode :tags '("tag2"))))
+    (ekg-setup-fts)
+    (ekg-save-note note1)
+    (should (= 1 (length (ekg-get-notes-from-fts "city"))))
+    (should (= 0 (length (ekg-get-notes-from-fts "crop"))))
+    (ekg-save-note note2)
+    (should (= 1 (length (ekg-get-notes-from-fts "city"))))
+    (should (= 1 (length (ekg-get-notes-from-fts "crop"))))
+    (should (= 2 (length (ekg-get-notes-from-fts "in"))))))
+
+(ekg-deftest ekg-fts-test-query-after-update ()
+  "Test if a query matches after the note text has been updated."
+  (let ((note (ekg-note-create :text "Five patients in three dose cohorts were enrolled" :mode 'text-mode :tags '("tag1"))))
     (ekg-setup-fts)
     (ekg-save-note note)
-    (should (= 1 (length (ekg-get-notes-from-fts "city"))))
-    (should (= 0 (length (ekg-get-notes-from-fts "saka"))))))
+    (should (= 1 (length (ekg-get-notes-from-fts "three"))))
+    (should (= 0 (length (ekg-get-notes-from-fts "treated"))))
+    (setf (ekg-note-text note) "Five patients in three dose cohorts were enrolled who all had deletions in the locus as the cause of Angelman syndrome and were treated with a monthly intrathecal dose of GTX-102 that increased for each of the first four doses provided to each patient.")
+    (ekg-save-note note)
+    (print ekg-db-file)
+    (should (= 1 (length (ekg-get-notes-from-fts "three"))))
+    (should (= 1 (length (ekg-get-notes-from-fts "treated"))))))
 
 
 (ekg-deftest ekg-fts-test-query-after-rebuild ()
