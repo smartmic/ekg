@@ -4,9 +4,9 @@
 
 ;; Author: Andrew Hyatt <ahyatt@gmail.com>
 ;; Homepage: https://github.com/ahyatt/ekg
-;; Package-Requires: ((triples "0.3.5") (emacs "28.1") (llm "0.1.1"))
+;; Package-Requires: ((triples "0.3.5") (emacs "28.1") (llm "0.4.0"))
 ;; Keywords: outlines, hypermedia
-;; Version: 0.4.0
+;; Version: 0.4.2
 ;; SPDX-License-Identifier: GPL-3.0-or-later
 ;;
 ;; This program is free software; you can redistribute it and/or
@@ -307,11 +307,25 @@ callers have already called this function")
   (triples-add-schema ekg-db 'ekg '(version :base/type cons :base/unique t))
   (run-hooks 'ekg-add-schema-hook))
 
+(defvar ekg-schema-text-cotypes '(text tagged time-tracked titled)
+  "All the types that are used in the ekg schema on text entities.
+Extensions can add to this list, but should not remove from it.
+Any type here in considered owned by ekg and will be removed
+during note deletion.
+
+These are not guaranteed to be only on text entities, however.")
+
 (defun ekg--generate-id ()
   "Return a unique ID for a note.
 This is not suitable for generating a large number of IDs in a
 small time frame. About one ID per second is reasonable."
   (sxhash (cons (time-convert (current-time) 'integer)  (random 100))))
+
+(defun ekg--normalize-tag (tag)
+  "Return a normalized version of TAG.
+No tag should be input from the user without being normalized
+before storage."
+  (string-trim (downcase (string-replace "," "" tag))))
 
 (defun ekg--normalize-note (note)
   "Make sure NOTE adheres to ekg-wide constraints before saving.
@@ -325,8 +339,7 @@ Note: we used to also trim text, but with inline commands, that
 is not a great idea, because an inline command sits outside of
 the text and may be after trailing whitespace."
   (setf (ekg-note-tags note)
-        (mapcar (lambda (tag)
-                  (string-trim (downcase (string-replace "," "" tag)))) (ekg-note-tags note)))
+        (mapcar #'ekg--normalize-tag (ekg-note-tags note)))
   (setf (ekg-note-text note)
         (substring-no-properties (ekg-note-text note)))
   (when (or (equal (ekg-note-id note) "") (not (ekg-note-id note)))
@@ -444,7 +457,7 @@ If the ID does not exist, create a new note with that ID."
   (run-hook-with-args 'ekg-note-pre-delete-hook id)
   (triples-with-transaction
     ekg-db
-    (cl-loop for type in '(tagged text time-tracked) do
+    (cl-loop for type in ekg-schema-text-cotypes do
              (triples-remove-type ekg-db id type))
     (cl-loop for inline-id in (triples-subjects-with-predicate-object
                                ekg-db 'inline/for-text id)
@@ -603,9 +616,9 @@ inlines."
   "Completion function for file transclusion."
   (let ((begin (save-excursion
                  (search-backward ">t" (line-beginning-position) t)
-                 (+ 1 (point))))
+                 (+ 2 (point))))
         (end (point)))
-    (when (< begin end)
+    (when (<= begin end)
       (list begin end
             (completion-table-dynamic (lambda (_)
                                         (mapcar (lambda (title-cons)
@@ -1301,6 +1314,45 @@ If EXPECT-VALID is true, warn when we encounter an unparseable field."
   "Return TAG transformed to mark it as trash."
   (format "trash/%s" tag))
 
+(defun ekg-fix-renamed-dup-tags (id)
+  "Fix duplicate tags in note with ID.
+After a tag is renamed, it could become a duplicate of another
+tag. This defun will fix the problem for one note, only executing
+a write if there is a problem."
+  (let* ((tagged-plist (triples-get-type ekg-db id 'tagged))
+         (tags (plist-get tagged-plist :tag))
+         (uniq-tags (seq-uniq tags)))
+    (when (> (length tags) (length uniq-tags))
+      (apply #'triples-set-type ekg-db id 'tagged (plist-put tagged-plist :tag uniq-tags)))))
+
+(defun ekg-clean-dup-tags ()
+  "Fix all duplicate tags in the database."
+  (ekg-connect)
+  (let ((cleaned))
+    (cl-loop for tag in (ekg-tags) do
+                          (let ((tagged (plist-get (triples-get-type ekg-db tag 'tag) :tagged)))
+                            (when (> (length tagged) (length (seq-uniq tagged)))
+                              ;; if there is duplication in the tag list then
+                              ;; something must have duplicate tags.
+                              (mapc #'ekg-fix-renamed-dup-tags tagged)
+                              (push tag cleaned))))
+    (when cleaned
+        (message "%d cleaned tags that were duplicated: %s" (length cleaned)
+                 (mapconcat #'identity cleaned ", ")))))
+
+(defun ekg-clean-leftover-types ()
+  "Clean up any ekg types that are left over without ekg notes."
+  (ekg-connect)
+  (let ((cleaned)
+        (notes (triples-subjects-of-type ekg-db 'text)))
+    (cl-loop for type in ekg-schema-text-cotypes do
+             (cl-loop for s in (seq-difference (triples-subjects-of-type ekg-db type) notes) do
+                      (push s cleaned)
+                      (triples-remove-type ekg-db s type)))
+    (when cleaned
+      (message "%d notes cleaned of leftover information: %s" (length cleaned)
+               (mapconcat (lambda (id) (format "%s" id)) cleaned ", ")))))
+
 ;; In order for emacsql / sqlite to not give build warnings we need to declare
 ;; them. Because we only require one to be installed, following the
 ;; implementation in the triples library, we can't just require them.
@@ -1312,20 +1364,22 @@ If EXPECT-VALID is true, warn when we encounter an unparseable field."
 This can be done whether TO-TAG already exists or not. This
 renames all instances of the tag globally, and all notes with
 FROM-TAG will use TO-TAG."
-  (interactive (list (completing-read "From tag: " (ekg-tags))
-                     (completing-read "To tag: " (ekg-tags))))
+  (interactive (list (completing-read "From tag: " (ekg-tags) nil t)
+                     (ekg--normalize-tag (completing-read "To tag: " (ekg-tags)))))
   (ekg-connect)
   (triples-with-transaction
     ekg-db
-    (pcase triples-sqlite-interface
-      ('builtin (sqlite-execute
-                 ekg-db
-                 "UPDATE triples SET object = ? WHERE object = ? AND predicate = 'tagged/tag'"
-                 (list (triples-standardize-val to-tag) (triples-standardize-val from-tag))))
-      ('emacsql (emacsql ekg-db [:update triples :set (= object $s1) :where (= object $s2) :and (= predicate 'tagged/tag)]
-                         to-tag from-tag)))
-    (triples-remove-type ekg-db from-tag 'tag)
-    (triples-set-type ekg-db to-tag 'tag))
+    (let ((old-tag-ids (plist-get (triples-get-type ekg-db from-tag 'tag) :tagged)))
+      (pcase triples-sqlite-interface
+        ('builtin (sqlite-execute
+                   ekg-db
+                   "UPDATE triples SET object = ? WHERE object = ? AND predicate = 'tagged/tag'"
+                   (list (triples-standardize-val to-tag) (triples-standardize-val from-tag))))
+        ('emacsql (emacsql ekg-db [:update triples :set (= object $s1) :where (= object $s2) :and (= predicate 'tagged/tag)]
+                           to-tag from-tag)))
+      (triples-remove-type ekg-db from-tag 'tag)
+      (triples-set-type ekg-db to-tag 'tag)
+      (mapc #'ekg-fix-renamed-dup-tags old-tag-ids)))
   (triples-backups-maybe-backup ekg-db (ekg-db-file)))
 
 (defun ekg-tags ()
@@ -1832,7 +1886,9 @@ is using.
 2) Deletes any notes that have no content or almost no content,
 as long as those notes aren't on resources that are interesting.
 
-3) Deletes all trashed notes.
+3) Delete all trashed notes.
+
+4) Fixes any duplicate tags.
 "
   (interactive)
   (ekg-connect)
@@ -1872,7 +1928,9 @@ as long as those notes aren't on resources that are interesting.
                            (seq-filter #'identity (list (when trashed-note "trashed")
                                                         (when almost-empty-note "almost empty")
                                                         (when empty-note "empty"))) ", "))
-                 (ekg-note-delete note)))))))
+                 (ekg-note-delete note))))))
+  (ekg-clean-dup-tags)
+  (ekg-clean-leftover-types))
 
 ;; Links for org-mode
 (require 'ol)
