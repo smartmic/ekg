@@ -85,10 +85,9 @@ ekg-fts case, a view on the triples table where the predicate is
     (ekg-save-note note2)
     (should (= 1 (length (ekg-get-notes-from-fts "doubled"))))
     (should (= 2 (length (ekg-get-notes-from-fts "increased"))))
+    (print ekg-db-file)
     (ekg-note-trash note1)
     (should (= 0 (length (ekg-get-notes-from-fts "doubled"))))
-    (ekg-rebuild-fts)
-    (print ekg-db-file)
     (should (= 0 (length (ekg-get-notes-from-fts "doubled"))))
     (should (= 1 (length (ekg-get-notes-from-fts "increased"))))
     (should (= 1 (length (ekg-get-notes-from-fts "fiscal"))))
@@ -154,8 +153,8 @@ ekg-fts case, a view on the triples table where the predicate is
 ;;; Manual testing using interactive ekg with one of the test databases:
 
 ;; (ekg-close)
-;; (setq ekg-db-file "/tmp/ekg-testberlPn")
+;; (setq ekg-db-file "/tmp/ekg-testM7JBjC")
 ;; (ekg-connect)
-;; (ekg-get-notes-from-fts "on")
+;; (ekg-note-trash (car (ekg-get-notes-from-fts "21")))
 ;; (ekg-get-notes-with-tag "tag2")
 ;; (ekg-db-file)

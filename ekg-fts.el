@@ -35,11 +35,8 @@ full-text search using SQLite3 native FTS5 extension."
   (let ((db (sqlite-open ekg-db-file)))
     (sqlite-execute db "CREATE VIEW ekg_note_view AS WITH trash AS (SELECT DISTINCT subject FROM triples WHERE predicate = 'tagged/tag' AND substr(object,2,6) = 'trash/') SELECT rowid, subject, object FROM triples WHERE predicate = 'text/text' AND subject NOT IN (SELECT subject FROM trash);")
     (sqlite-execute db "CREATE VIRTUAL TABLE IF NOT EXISTS ekg_fts USING FTS5 (subject, object, content = 'ekg_note_view', content_rowid = rowid);")
-    (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS ekg_fts_ai AFTER INSERT ON triples WHEN new.predicate = 'text/text' BEGIN
+    (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS ekg_fts_ai AFTER INSERT ON triples WHEN new.predicate = 'text/text' AND new.subject NOT IN (SELECT DISTINCT subject FROM triples WHERE predicate = 'tagged/tag' AND substr(object,2,6) = 'trash/') BEGIN
   INSERT INTO ekg_fts(rowid, subject, object) VALUES (new.rowid, new.subject, new.object);
-END;")
-    (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS ekg_fts_au AFTER UPDATE ON triples WHEN old.predicate = 'tagged/tag' AND substr(new.object,2,6) = 'trash/' BEGIN
-  INSERT INTO ekg_fts(ekg_fts, rowid, subject, object) SELECT 'delete', rowid, subject, object FROM triples WHERE subject = old.subject AND predicate = 'text/text';
 END;")
     (sqlite-execute db "CREATE TRIGGER IF NOT EXISTS ekg_fts_ad AFTER DELETE ON triples WHEN old.predicate = 'text/text' BEGIN
   INSERT INTO ekg_fts(ekg_fts, rowid, subject, object) VALUES('delete', old.rowid, old.subject, old.object);
