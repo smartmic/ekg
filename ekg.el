@@ -185,7 +185,17 @@ backups in your database after it has been created, run
                                ("Title" . ekg--metadata-update-title))
   "Functions that update a note from the buffer's metadata text.
 Each function takes its field's property value and updates the
-buffer's `ekg-note' with the results of parsing that value.")
+buffer's `ekg-note' with the results of parsing that value. The
+function takes one argument, a list of the field metadata
+property values for multivalue types, or a single one for single
+value types. If `ekg-property-multivalue-type' has an entry, it
+is a multivalue type.")
+
+(defconst ekg-property-multivalue-type '(("Tags" . comma)
+                                         ("Title" . line))
+  "Defines per type how multiple values are separated.
+The values are symbols, COMMA means a comma-separated value. LINE
+means each value gets its own property line.")
 
 (defvar ekg-metadata-labels '((:titled/title . "Title"))
   "Alist of properties that can be on the note and their labels.
@@ -226,7 +236,7 @@ This includes new notes that start with tags.  All functions are
 called with the tag as the single argument, and run in the buffer
 editing the note.")
 
-(defconst ekg-version "0.4.0"
+(defconst ekg-version "0.4.2"
   "The version of ekg, used to understand when the database needs
 upgrading.")
 
@@ -690,7 +700,7 @@ FORMAT-STR controls how the time is formatted."
   (if-let (title (plist-get (ekg-note-properties note) :titled/title))
       (propertize (concat
                (mapconcat #'identity (plist-get (ekg-note-properties note) :titled/title)
-                          " / ") "\n")
+                          "\n") "\n")
               'face 'ekg-title)
     ""))
 
@@ -897,13 +907,18 @@ rather than an auto-generated number."
                              (mapconcat (lambda (tag) (format "%s" tag))
                                         (ekg-note-tags note) ", ")))
       (map-apply (lambda (k v)
-                   (when-let (label (cdr (assoc k ekg-metadata-labels)))
-                     (insert (ekg--metadata-string
-                              label
-                              (if (listp v)
-                                  (mapconcat (lambda (v) (format "%s" v))
-                                             v ", ")
-                                (format "%s" v))))))
+                   (when-let ((label (assoc-default k ekg-metadata-labels)))
+                     (if (listp v)
+                         (pcase (assoc-default label ekg-property-multivalue-type)
+                           ('line (cl-loop for val in v do
+                                           (insert (ekg--metadata-string label val))))
+                           ('comma (insert (ekg--metadata-string
+                                            label
+                                            (if (listp v)
+                                                
+                                                (mapconcat (lambda (v) (format "%s" v))
+                                                           v ", ")
+                                              (format "%s" v)))))))))
                  (ekg-note-properties note))
       (buffer-string))))
 
@@ -1033,8 +1048,7 @@ However, if URL already exists, we edit the existing note on it."
     (if existing
         (ekg-edit (ekg-get-note-with-id url))
       (ekg-capture :tags (list (concat "doc/" (downcase cleaned-title)))
-                   ;; Remove commas from the value.
-                   :properties `(:titled/title ,cleaned-title)
+                   :properties `(:titled/title ,(list title))
                    :id url))))
 
 (defun ekg-capture-file ()
@@ -1050,7 +1064,7 @@ file. If not, an error will be thrown."
       (if existing
           (ekg-edit (ekg-get-note-with-id file))
         (ekg-capture :tags (list (concat "doc/" (downcase (file-name-nondirectory file))))
-                     :properties `(:titled/title ,(file-name-nondirectory file))
+                     :properties `(:titled/title ,(list (file-name-nondirectory file)))
                      :id file)))))
 
 (defun ekg-change-mode (mode)
@@ -1183,8 +1197,13 @@ attempt the completion."
         (save-excursion (skip-chars-forward "^:\s\t\n") (point))
         (completion-table-dynamic
          (lambda (_)
+           ;; Complete all fields, except single-value fields (which have no
+           ;; entry in ekg-property-multivalue-type) with an existing field
+           ;; already in existence.
            (seq-difference (mapcar #'car ekg-metadata-parsers)
-                           (mapcar #'car (ekg--metadata-fields nil)))))))
+                           (seq-difference
+                            (mapcar #'car (ekg--metadata-fields nil))
+                            (mapcar #'car ekg-property-multivalue-type)))))))
 
 (defun ekg--tags-cap-exit (completion finished)
   "Cleanup after completion at point happened in a tag.
@@ -1249,13 +1268,12 @@ The metadata fields are comma separated."
 
 (defun ekg--metadata-update-tag (val)
   "Update the tag field from the metadata VAL."
-  (setf (ekg-note-tags ekg-note) (ekg--split-metadata-string val)))
+  (setf (ekg-note-tags ekg-note) val))
 
 (defun ekg--metadata-update-title (val)
   "Update the title field from the metadata VAL."
   (setf (ekg-note-properties ekg-note)
-        (plist-put (ekg-note-properties ekg-note) :titled/title
-                   (ekg--split-metadata-string val))))
+        (plist-put (ekg-note-properties ekg-note) :titled/title val)))
 
 (defun ekg--metadata-update-resource (val)
   "Update the resource to the metadata VAL."
@@ -1274,15 +1292,26 @@ If EXPECT-VALID is true, warn when we encounter an unparseable field."
           (when expect-valid
             (warn "EKG: No field could be parsed from metadata line at point %s" (point))))
         (forward-line))
-      fields)))
+      (nreverse fields))))
 
 (defun ekg--update-from-metadata ()
   "Update the `ekg-note' object from the metadata."
-  (cl-loop for field in (ekg--metadata-fields t)
+  (cl-loop with values = (make-hash-table :test 'equal)
+           for (field . value) in (ekg--metadata-fields t)
            do
-           (if-let (func (assoc (car field) ekg-metadata-parsers))
-                (funcall (cdr func) (cdr field))
-              (warn "EKG: No function found for field %s" (car field)))))
+           (pcase (assoc-default field ekg-property-multivalue-type)
+             ('line (push value (gethash field values)))
+             ('comma (mapc (lambda (elt) (push elt (gethash field values)))
+                           (ekg--split-metadata-string value)))
+             (_ (setf (gethash field values) value)))
+           finally return
+           (maphash (lambda (key val)
+                      (if-let (func (assoc key ekg-metadata-parsers))
+                          (funcall (cdr func) (if (listp val)
+                                                  (nreverse (flatten-list val))
+                                                val))
+                        (warn "EKG: No function found for field %s" key)))
+                    values)))
 
 (defun ekg-capture-finalize ()
   "Save the current note."
@@ -1867,6 +1896,16 @@ the database after the upgrade, in list form."
            do
            (ekg-tag-delete tag)))
 
+(defun ekg-clean-propertized-text ()
+  "Find text with propertized text and remove the properties."
+  (cl-loop for s in (triples-fts-query ekg-db "face") do
+           (let* ((text-plist (triples-get-type ekg-db s 'text))
+                  (text (plist-get text-plist :text))
+                  (cleaned (substring-no-properties text)))
+             (unless (equal-including-properties text cleaned)
+               (message "Found propertized text in %s, cleaning" s)
+               (apply #'triples-set-type ekg-db s 'text (plist-put text-plist :text cleaned))))))
+
 (defun ekg-clean-db ()
   "Clean all useless or malformed data from the database.
 Some of this is tags which have no uses, which we consider
@@ -1886,7 +1925,7 @@ is using.
 2) Deletes any notes that have no content or almost no content,
 as long as those notes aren't on resources that are interesting.
 
-3) Delete all trashed notes.
+3) Deletes all trashed notes.
 
 4) Fixes any duplicate tags.
 "
@@ -1930,7 +1969,8 @@ as long as those notes aren't on resources that are interesting.
                                                         (when empty-note "empty"))) ", "))
                  (ekg-note-delete note))))))
   (ekg-clean-dup-tags)
-  (ekg-clean-leftover-types))
+  (ekg-clean-leftover-types)
+  (ekg-clean-propertized-text))
 
 ;; Links for org-mode
 (require 'ol)
